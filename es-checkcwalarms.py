@@ -63,11 +63,13 @@ import boto3
 import argparse
 import collections
 
-esfreespace = 2000.0  # default amount of free space (in MB)
+esfreespace = 2048.0  # default amount of free space (in MB). ALSO minimum set by AWS ES
 esFreespacePercent = .20    # Recommended 20% free space
 esprefix = ""
+account = "123456789012"
+region = "us-east-1"
 # WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
-alarmActions = ["arn:aws:sns:us-west-2:121969496650:sendnotification"]
+alarmActions = ["arn:aws:sns:" + region + ":" + account + ":sendnotification"]
 
 # AWS Elasticsearch settings 
 nameSpace = 'AWS/ES'    # set for these AWS Elasticsearch alarms
@@ -105,9 +107,12 @@ def get_args():
         help = "IAM profile name to use")
 
     parser.add_argument("-r", "--region", required = False, type = str, default='us-east-1', help = "AWS region for the domain. Default: us-east-1")
-    
+
     args = parser.parse_args()
     args.prog = parser.prog
+    # Reset minimum allowable, if less than AWS ES min
+    if args.free < esfreespace:
+        args.free = esfreespace
     return args
 
 def convert_unicode(data):
@@ -149,6 +154,7 @@ class ESDomain(object):
         self.esfree = wantesfree      # Minimum free to allow, if no other info available
         self.warnings = []
         self.ebs = False
+        self.kmsenabled = False
         # The following array specifies the alarms we wish to create for each AWS Elasticsearch domain.
         # We may need to reset some parameters per domain stats, so we reset it for each domain.
         # The stats are selected per the following documentation:
@@ -176,9 +182,15 @@ class ESDomain(object):
         self.log_publishing()
         
         if self.dedicatedMasters:
-            # The following alarms apply for systems with dedicated master nodes.
+            # The following alarms apply for domains with dedicated master nodes.
             self.esAlarms.append(("MasterCPUUtilization", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ))
             self.esAlarms.append(("MasterJVMMemoryPressure", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ))
+            self.esAlarms.append(("MasterReachableFromNode", "Maximum", 60, 5, "LessThanOrEqualToThreshold", 0.0 ))
+            
+        if self.kmsenabled:
+            # The following alarms are available for domains with encryption at rest
+            self.esAlarms.append(("KMSKeyError", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))
+            self.esAlarms.append(("KMSKeyInaccessible", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))
         
         # Figure out how much storage the domain has, and should have 
         self.calc_storage()
@@ -195,7 +207,7 @@ class ESDomain(object):
  
     def get_domain_stats(self, botoes):
         # First: get the domain stats, and check the basic domain options against best practices
-        # TO FIX: If get throttled on this call, wait and retry
+        # TO FIX: If get throttled on this call (beyond boto3 throttling recovery), wait and retry
         response = None
         domain = self.domain
         try:
@@ -219,7 +231,15 @@ class ESDomain(object):
                 " security groups:", str(convert_unicode(domainStats["VPCOptions"]["SecurityGroupIds"])))
         else:
             self.warnings.append("Not using VPC Endpoint")
-        
+
+        # Encryption at rest
+        if "EncryptionAtRestOptions" in domainStats:
+            print(domain, "EncryptionAtRestOptions: ", str(convert_unicode(domainStats["EncryptionAtRestOptions"]["Enabled"])), 
+                "Key:", str(convert_unicode(domainStats["EncryptionAtRestOptions"]["KmsKeyId"])))
+            self.kmsenabled = domainStats["EncryptionAtRestOptions"]["Enabled"]   
+        else:
+            self.warnings.append("Not using Encryption at Rest")
+            
         endpoint = None
         if "Endpoint" in domainStats:
             endpoint = domainStats["Endpoint"]

@@ -65,8 +65,9 @@ import ast
 env = 'Test'
 domain = 'testcluster1'
 account = "123456789012"
+region = "us-east-1"
 # WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
-alarmActions = ["arn:aws:sns:us-west-2:123456789012:sendnotification"]
+alarmActions = ["arn:aws:sns:" + region + ":" + account + ":sendnotification"]
 
 # AWS Elasticsearch settings 
 nameSpace = 'AWS/ES'    # set for these AWS Elasticsearch alarms
@@ -83,7 +84,8 @@ diskSpace = {"r3.large.elasticsearch": 32,
     "m3.2xlarge.elasticsearch":	160, 
     "i2.xlarge.elasticsearch":	800,
     "i2.2xlarge.elasticsearch":	1600}
-esfreespace = 2000.0  # default amount of free space (in MB)
+    
+esfreespace = 2048.0  # default amount of free space (in MB). ALSO minimum set by AWS ES
 esFreespacePercent = .20    # Recommended 20% free space    
 #logger = logging.getLogger()
 #logger.setLevel(print)
@@ -116,6 +118,10 @@ def get_args():
         logging.critical("Insufficient arguments provided. Exiting for safety.")
         sys.exit()
     args = parser.parse_args()
+    # Reset minimum allowable, if less than AWS ES min
+    if args.free < esfreespace:
+        args.free = esfreespace
+        
     args.notify = ast.literal_eval(args.notify)
     args.prog = parser.prog
     return args
@@ -182,11 +188,17 @@ if __name__ == "__main__":
         , ("AutomatedSnapshotFailure", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 )        
         ]
         
-    # The following alarms apply for systems with dedicated master nodes.
+    # The following alarms apply for domains with dedicated master nodes.
     if domainStats['ElasticsearchClusterConfig']['DedicatedMasterEnabled'] == "True":
         esAlarms.append(("MasterCPUUtilization", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ))
         # The following doesn't seem to show up in CloudWatch metrics. Why?
         esAlarms.append(("MasterJVMMemoryPressure", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ))
+        esAlarms.append(("MasterReachableFromNode", "Maximum", 60, 5, "LessThanOrEqualToThreshold", 0.0 ))
+            
+    if "EncryptionAtRestOptions" in domainStats:
+        # The following alarms are available for domains with encryption at rest
+        esAlarms.append(("KMSKeyError", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))
+        esAlarms.append(("KMSKeyInaccessible", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))
             
     # Unless you add the correct dimensions, the alarm will not correctly "connect" to the metric
     # How do you know what's correct? - at the bottom of http://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/es-metricscollected.html
