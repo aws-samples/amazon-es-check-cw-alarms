@@ -14,7 +14,7 @@ express or implied. See the License for the specific language governing
 permissions and limitations under the License.
 ------------------------------------------------------------------------------
 
-Given the name of an Elasticsearch cluster, create the set of recommended CloudWatch alarms.
+Given the name of an Amazon Elasticsearch Service cluster, create the set of recommended CloudWatch alarms.
 
 Naming convention for the alarms are: {Environment}-{domain}-{MetricName}-alarm
 
@@ -32,7 +32,7 @@ Requires the following permissions:
         
 Expects the following parameters:
 env               environment; is used in the Alarm name only. Default: Test
-clusterName       AWS Elasticsearch domain name on which the alarms are to be created
+clusterName       Amazon Elasticsearch Service domain name on which the alarms are to be created
 clientId          the account Id of the owning AWS account (needed for CloudWatch alarm dimension)
 alarmActions      list of SNS arns to be notified when the alarm is fired 
 free              minimum amount of free storage to assign, if no other information is available
@@ -69,8 +69,8 @@ region = "us-east-1"
 # WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
 alarmActions = ["arn:aws:sns:" + region + ":" + account + ":sendnotification"]
 
-# AWS Elasticsearch settings 
-nameSpace = 'AWS/ES'    # set for these AWS Elasticsearch alarms
+# Amazon Elasticsearch Service settings 
+nameSpace = 'AWS/ES'    # set for these Amazon Elasticsearch Service alarms
 # The following table must be updated when instance definitions change
 # See: https://aws.amazon.com/elasticsearch-service/pricing/ , select your region
 diskSpace = {"r3.large.elasticsearch": 32,
@@ -99,15 +99,15 @@ def get_args():
     Returns:
         object (ArgumentParser): arguments and configuration settings
     """
-    parser = argparse.ArgumentParser(description = 'Create a set of recommended CloudWatch alarms for a given AWS Elasticsearch cluster.')  
-    parser.add_argument("-c", "--cluster", required = True, type = str, help = "AWS Elasticsearch cluster name (e.g., testcluster1)")
+    parser = argparse.ArgumentParser(description = 'Create a set of recommended CloudWatch alarms for a given Amazon Elasticsearch Service domain.')  
+    parser.add_argument("-c", "--cluster", required = True, type = str, help = "Amazon Elasticsearch Service domain name (e.g., testcluster1)")
     #parser.add_argument("-a", "--account", required = True, type = int, help = "AWS account id of the owning account (needed for metric dimension).")
     parser.add_argument("-e", "--env", required = False, type = str, default = "Test", 
         help = "Environment (e.g., Test, or Prod). Prepended to the alarm name.")
     parser.add_argument("-n", "--notify", required = False, type = str, default=alarmActions,
         help = "List of CloudWatch alarm actions; e.g. ['arn:aws:sns:xxxx']")
     # The following argument should be removed (TO DO) once we calculate free storage required based on cluster size for instance storage too
-    parser.add_argument("-f", "--free", required = False, type = float, default=2000.0, help = "Minimum free storage (Mb) on which to alarm")
+    parser.add_argument("-f", "--free", required = False, type = float, default=2000.0, help = "Minimum free storage (MB) on which to alarm")
     parser.add_argument("-p", "--profile", required = False, type = str, default='default',
         help = "IAM profile name to use")
 
@@ -159,7 +159,7 @@ if __name__ == "__main__":
             print("Instance storage definition is:", diskSpace[clusterConfig['InstanceType']], "; free storage calced to:", esfree)
         else:
             # InstanceType not found in diskSpace. What's going on? (some instance types change to/from EBS, over time, it seems)
-            print(clusterConfig['InstanceType'] + " not EBS, and definition of its diskspace is not available.")
+            print(clusterConfig['InstanceType'] + " not EBS, and definition of its disk space is not available.")
     else:  
         ebsOptions = domainStats['EBSOptions']
         iops = "No Iops"
@@ -171,7 +171,7 @@ if __name__ == "__main__":
         esfree = float(int(float(totalStorage) * esFreespacePercent))
     print("Desired free storage set to (in MB):", str(esfree)) 
     
-    # The following array specifies the statistics we wish to create for each AWS Elasticsearch cluster. 
+    # The following array specifies the statistics we wish to create for each Amazon ES cluster. 
     # The stats are selected per the following documentation:
     #  http://docs.aws.amazon.com/elasticsearch-service/latest/developerguide/es-managedomains.html#es-managedomains-cloudwatchmetrics
     # Array format:
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         esAlarms.append(("MasterJVMMemoryPressure", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ))
         esAlarms.append(("MasterReachableFromNode", "Maximum", 60, 5, "LessThanOrEqualToThreshold", 0.0 ))
             
-    if "EncryptionAtRestOptions" in domainStats:
+    if "EncryptionAtRestOptions" in domainStats and domainStats["EncryptionAtRestOptions"]["Enabled"]:
         # The following alarms are available for domains with encryption at rest
         esAlarms.append(("KMSKeyError", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))
         esAlarms.append(("KMSKeyInaccessible", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))

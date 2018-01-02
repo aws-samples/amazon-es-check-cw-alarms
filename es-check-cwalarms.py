@@ -14,7 +14,7 @@ express or implied. See the License for the specific language governing
 permissions and limitations under the License.
 ------------------------------------------------------------------------------
 
-Checks the alarms set up for each Elasticsearch domain in this region.
+Checks the alarms set up for each Amazon Elasticsearch Service domain in this region.
 Can be run as a Lambda or as a standalone Python program.
 
 Requires the following permissions:  
@@ -33,7 +33,7 @@ Requires the following permissions:
 
 This code can be run from the command line, or as a Lambda function.        
 If run as a Lambda: expects the following environment variables: 
-esprefix        string      prefix for AWS Elasticsearch domain names: only check that set of domains; e.g. 'test-'
+esprefix        string      prefix for Amazon Elasticsearch Service domain names: only check that set of domains; e.g. 'test-'
 region          string      region in which the Lambda is to be run
 # WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
 alarmActions    string      array of actions; e.g. '["arn:aws:sns:us-west-2:123456789012:sendnotification"]'
@@ -71,8 +71,8 @@ region = "us-east-1"
 # WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
 alarmActions = ["arn:aws:sns:" + region + ":" + account + ":sendnotification"]
 
-# AWS Elasticsearch settings 
-nameSpace = 'AWS/ES'    # set for these AWS Elasticsearch alarms
+# Amazon Elasticsearch Service settings 
+nameSpace = 'AWS/ES'    # set for these Amazon ES alarms
 # The following table must be updated when instance definitions change
 # See: https://aws.amazon.com/elasticsearch-service/pricing/ , select your region
 # Definitions are in GB
@@ -96,13 +96,13 @@ def get_args():
     Returns:
         object (ArgumentParser): arguments and configuration settings
     """    
-    parser = argparse.ArgumentParser(description = 'Checks a set of recommended CloudWatch alarms for Amazon Elasticsearch domains (optionally, those beginning with a given prefix).')  
+    parser = argparse.ArgumentParser(description = 'Checks a set of recommended CloudWatch alarms for Amazon Elasticsearch Service domains (optionally, those beginning with a given prefix).')  
     parser.add_argument("-e", "--esprefix", required = False, type = str, default = "", 
-        help = "Only check AWS Elasticsearch domains that begin with this prefix.")
+        help = "Only check Amazon Elasticsearch Service domains that begin with this prefix.")
     parser.add_argument("-n", "--notify", required = False, type = str, default=alarmActions,
         help = "List of CloudWatch alarm actions; e.g. ['arn:aws:sns:xxxx']")
     # The following argument is used in the cases where free storage can't be calculated from known/acquirable info
-    parser.add_argument("-f", "--free", required = False, type = float, default=esfreespace, help = "Minimum free storage (Mb) on which to alarm")
+    parser.add_argument("-f", "--free", required = False, type = float, default=esfreespace, help = "Minimum free storage (MB) on which to alarm")
     parser.add_argument("-p", "--profile", required = False, type = str, default='default',
         help = "IAM profile name to use")
 
@@ -144,7 +144,7 @@ def get_domains_list(esclient, esprefix):
 
 class ESDomain(object):
     '''
-    This class represents the Amazon Elasticsearch domain
+    This class represents the Amazon Elasticsearch Service domain
     '''
     
     def __init__(self, botoes, domain, wantesfree):
@@ -155,7 +155,7 @@ class ESDomain(object):
         self.warnings = []
         self.ebs = False
         self.kmsenabled = False
-        # The following array specifies the alarms we wish to create for each AWS Elasticsearch domain.
+        # The following array specifies the alarms we wish to create for each Amazon ES domain.
         # We may need to reset some parameters per domain stats, so we reset it for each domain.
         # The stats are selected per the following documentation:
         #  http://docs.aws.amazon.com/elasticsearch-service/latest/developerguide/es-managedomains.html#es-managedomains-cloudwatchmetrics
@@ -176,7 +176,7 @@ class ESDomain(object):
         self.get_domain_stats(botoes) 
         if self.domainStats == None:
             # For whatever reason, didn't get a response from this domain; FAIL.
-            print("No domain results received from domain " + domain)
+            print("No domainStats response received from domain " + domain)
             return None    
         self.nodes_and_masters()
         self.log_publishing()
@@ -221,7 +221,7 @@ class ESDomain(object):
         self.domainStats = domainStats
         #print(str(response))
         print("=======================================================================================================")
-        print("Starting checks for Elasticsearch domain {} , version is {}".format(domain, self.esversion))
+        print("Starting checks for Amazon Elasticsearch Service domain {} , version is {}".format(domain, self.esversion))
         
         # VPC Endpoint
         if "VPCOptions" in domainStats:
@@ -233,7 +233,7 @@ class ESDomain(object):
             self.warnings.append("Not using VPC Endpoint")
 
         # Encryption at rest
-        if "EncryptionAtRestOptions" in domainStats:
+        if "EncryptionAtRestOptions" in domainStats and domainStats["EncryptionAtRestOptions"]["Enabled"]:
             print(domain, "EncryptionAtRestOptions: ", str(convert_unicode(domainStats["EncryptionAtRestOptions"]["Enabled"])), 
                 "Key:", str(convert_unicode(domainStats["EncryptionAtRestOptions"]["KmsKeyId"])))
             self.kmsenabled = domainStats["EncryptionAtRestOptions"]["Enabled"]   
@@ -296,7 +296,7 @@ class ESDomain(object):
                 print(self.domain, "Instance storage definition is:", diskSpace[clusterConfig['InstanceType']], "GB; free storage calced to:", esfree, "MB")
             else:
                 # InstanceType not found in diskSpace. What's going on? (some instance types change to/from EBS, over time, it seems)
-                self.warnings.append(clusterConfig['InstanceType'] + " not EBS, and definition of its diskspace is not available.")
+                self.warnings.append(clusterConfig['InstanceType'] + " not EBS, and definition of its disk space is not available.")
         else:  
             ebsOptions = domainStats['EBSOptions']
             iops = "No Iops"
@@ -315,7 +315,7 @@ class ESDomain(object):
 def process_alarms(esclient, cwclient, espref, wantesfree, account, alarmActions):        
     ourDomains = get_domains_list(esclient, espref)
     # Now we've got the list 
-    print("List of Elasticsearch domains starting with given prefix (" + espref + "): " + str(ourDomains))
+    print("List of Amazon Elasticsearch Service domains starting with given prefix (" + espref + "): " + str(ourDomains))
 
     # Now, get a list of the CloudWatch alarms, for each domain.
     # We could cut this list significantly if we knew the alarm-name-prefix would always be ... 
