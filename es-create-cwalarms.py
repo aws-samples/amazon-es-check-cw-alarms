@@ -67,7 +67,7 @@ domain = 'testcluster1'
 account = "123456789012"
 region = "us-east-1"
 # WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
-alarmActions = ["arn:aws:sns:" + region + ":" + account + ":sendnotification"]
+alarmActions = "['" + "arn:aws:sns:" + region + ":" + account + ":sendnotification']"
 
 # Amazon Elasticsearch Service settings 
 nameSpace = 'AWS/ES'    # set for these Amazon Elasticsearch Service alarms
@@ -140,6 +140,7 @@ if __name__ == "__main__":
     account = boto3.client('sts').get_caller_identity().get('Account')
     b3session = boto3.Session(profile_name=args.profile, region_name=args.region)
     domain = args.cluster
+    env = args.env
 
     # Get current account id: BUT, would need that STS access. Making it a parameter instead reduces the privileges required
     #print(boto3.client('sts').get_caller_identity()['Account'])

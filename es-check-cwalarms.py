@@ -69,7 +69,7 @@ esprefix = ""
 account = "123456789012"
 region = "us-east-1"
 # WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
-alarmActions = ["arn:aws:sns:" + region + ":" + account + ":sendnotification"]
+alarmActions = "['" + "arn:aws:sns:" + region + ":" + account + ":sendnotification']"
 
 # Amazon Elasticsearch Service settings 
 nameSpace = 'AWS/ES'    # set for these Amazon ES alarms
