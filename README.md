@@ -14,7 +14,7 @@ Note that the term "domain" (the term used by Amazon Elasticsearch Service) and 
 
 es-check-cwalarms-lambda
 ------
-This Python script checks whether the recommended/desired alarms are set. It can be run from the command line; or, set up as a scheduled Lambda.  For example: if clusters were originally set up without the desired alarms; or, configuration changes - cluster size increases being a common one - might require updates to alarms.
+This Python 2.7 script checks whether the recommended/desired alarms are set. It can be run from the command line; or, set up as a scheduled Lambda.  For example: if clusters were originally set up without the desired alarms; or, configuration changes - cluster size increases being a common one - might require updates to alarms.
 
 The script assumes you have the permissions listed in the provided sample IAM role (es-create-cwalarms-iamrole.json).
 
@@ -55,9 +55,21 @@ awsestest53 Test-Elasticsearch-awsestest53-CPUUtilization-Alarm AlarmActions doe
 
 ```
 
+To run as a Lambda:
+Follow the instructions [here](https://docs.aws.amazon.com/lambda/latest/dg/get-started-create-function.html), with the following changes:
+* For Runtime, use Python 2.7
+* For IAM Role, use a Lambda execution role with the added permissions in the provided sample IAM role (es-create-cwalarms-iamrole.json)
+* For Timeout: increase the value to 3 minutes (depending on the number of domains you have)
+* If desired, add environment variables:
+	* esprefix: only check domains beginning with this prefix
+	* esfree: minimum free space 
+* Edit the Lambda code inline, and paste in the contents of es-check-cwalarms.py.
+ 
+ Save and test the Lambda. 
+ 
 Es-create-cwalarms
 -------
-This script can be run from the command line to create the recommended set of alarms for a specific Amazon ES cluster.
+This Python 2.7 script can be run from the command line to create the recommended set of alarms for a specific Amazon ES cluster.
 
 It assumes you have the permissions listed in the provided sample IAM role.
 

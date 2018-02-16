@@ -1,19 +1,5 @@
 #!/usr/bin/env python
 """
-Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License").
-You may not use this file except in compliance with the License.
-A copy of the License is located at
-
-http://aws.amazon.com/apache2.0
-
-or in the "license" file accompanying this file. This file is distributed
-on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
-express or implied. See the License for the specific language governing
-permissions and limitations under the License.
-------------------------------------------------------------------------------
-
 Given the name of an Amazon Elasticsearch Service cluster, create the set of recommended CloudWatch alarms.
 
 Naming convention for the alarms are: {Environment}-{domain}-{MetricName}-alarm
@@ -44,7 +30,7 @@ free              minimum amount of free storage to assign, if no other informat
 
 from __future__ import print_function # Python 2/3 compatibility
 
-# Need to: pip install elasticsearch; boto3; requests_aws4auth; requests?
+# Need to: pip install elasticsearch; boto3; requests_aws4auth; requests
 # First: import standard modules
 import string
 import json
@@ -53,43 +39,102 @@ from datetime import datetime
 import sys
 import os
 import logging
-import pprint
+import traceback
 import boto3
 import argparse
 import ast
+import collections
 
-# Defaults for parameters:
-# env               environment; is used in the Alarm name only
-# clusterName       Elasticsearch domain name
-# alarmActions      list of SNS arns to be notified when the alarm is fired
-env = 'Test'
-domain = 'testcluster1'
-account = "123456789012"
-region = "us-east-1"
-# WARNING!! The alarmActions can be hardcoded, to allow for easier standardization. BUT make sure they're what you want!
-alarmActions = "['" + "arn:aws:sns:" + region + ":" + account + ":sendnotification']"
+DEFAULT_REGION = 'us-east-1'
+DEFAULT_SNSTOPIC = "sendnotification"
+
+Alarm = collections.namedtuple('Alarm', ['metric', 'stat', 'period',  'eval_period', 'operator', 'threshold', 'alarmAction'])
 
 # Amazon Elasticsearch Service settings 
-nameSpace = 'AWS/ES'    # set for these Amazon Elasticsearch Service alarms
-# The following table must be updated when instance definitions change
+ES_NAME_SPACE = 'AWS/ES'    # set for these Amazon Elasticsearch Service alarms
+# The following table lists instance types with instance storage, for free storage calculations. 
+# It must be updated when instance definitions change
 # See: https://aws.amazon.com/elasticsearch-service/pricing/ , select your region
-diskSpace = {"r3.large.elasticsearch": 32,
+# Definitions are in GB
+DISK_SPACE = {"r3.large.elasticsearch": 32,
     "r3.xlarge.elasticsearch":	80,
     "r3.2xlarge.elasticsearch":	160,
     "r3.4xlarge.elasticsearch":	320,
-    "r3.8xlarge.elasticsearch":	32,
+    "r3.8xlarge.elasticsearch":	640,
     "m3.medium.elasticsearch":	4,
     "m3.large.elasticsearch":	32,
     "m3.xlarge.elasticsearch":	80,
     "m3.2xlarge.elasticsearch":	160, 
     "i2.xlarge.elasticsearch":	800,
-    "i2.2xlarge.elasticsearch":	1600}
+    "i2.2xlarge.elasticsearch":	1600,
+    "i3.large.elasticsearch":   475,
+    "i3.xlarge.elasticsearch":  950,
+    "i3.2xlarge.elasticsearch": 1900,
+    "i3.4xlarge.elasticsearch": 3800,
+    "i3.8xlarge.elasticsearch": 7600,
+    "i3.16xlarge.elasticsearch": 15200
+    }
     
-esfreespace = 2048.0  # default amount of free space (in MB). ALSO minimum set by AWS ES
-esFreespacePercent = .20    # Recommended 20% free space    
-#logger = logging.getLogger()
-#logger.setLevel(print)
-#logging.basicConfig(format='%(asctime)s app=' + esapp + ' %(levelname)s:%(name)s %(message)s',level=print)
+MIN_ES_FREESPACE = 2048.0  # default amount of free space (in MB). ALSO minimum set by AWS ES
+MIN_ES_FREESPACE_PERCENT = .20    # Required minimum 20% free space
+DEFAULT_ES_FREESPACE = MIN_ES_FREESPACE  
+
+LOG_LEVELS = {'CRITICAL': 50, 'ERROR': 40, 'WARNING': 30, 'INFO': 20, 'DEBUG': 10}
+
+def init_logging():
+    # Setup logging because debugging with print can get ugly.
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+    logging.getLogger("boto3").setLevel(logging.WARNING)
+    logging.getLogger('botocore').setLevel(logging.WARNING)
+    logging.getLogger('nose').setLevel(logging.WARNING)
+
+    return logger
+
+def setup_local_logging(logger, log_level = 'INFO'):
+    # Set the Logger so if running locally, it will print out to the main screen.
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+        '%(asctime)s %(name)-12s %(levelname)-8s %(message)s',datefmt='%Y-%m-%dT%H:%M:%SZ'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    if log_level in LOG_LEVELS:
+        logger.setLevel(LOG_LEVELS[log_level])
+    else:
+        logger.setLevel(LOG_LEVELS['INFO'])
+
+    return logger
+
+def set_log_level(logger, log_level = 'INFO'):
+    # There is some stuff that needs to go here.
+    if log_level in LOG_LEVELS:
+        logger.setLevel(LOG_LEVELS[log_level])
+    else:
+        logger.setLevel(LOG_LEVELS['INFO'])
+
+    return logger
+
+def convert_unicode(data):
+    '''
+    Takes a unicode input, and returns the same as utf-8
+    '''
+    if isinstance(data, basestring):
+        return str(data)
+    elif isinstance(data, collections.Mapping):
+        return dict(map(convert_unicode, data.iteritems()))
+    elif isinstance(data, collections.Iterable):
+        return type(data)(map(convert_unicode, data))
+    #else:
+    return data       
+
+def str_convert_unicode(data):   
+    return str(convert_unicode(data))
+    
+def get_default_alarm_actions(region, account, snstopic):
+    # A default alarmActions can be hardcoded, to allow for easier standardization.
+    alarmActions = ["arn:aws:sns:" + str(region) + ":" + str(account) + ":" + str(snstopic)]
+    return alarmActions    
 
 def get_args():
     """
@@ -99,19 +144,26 @@ def get_args():
     Returns:
         object (ArgumentParser): arguments and configuration settings
     """
-    parser = argparse.ArgumentParser(description = 'Create a set of recommended CloudWatch alarms for a given Amazon Elasticsearch Service domain.')  
+    try:
+        currentAccount = boto3.client('sts').get_caller_identity().get('Account')   
+    except Exception as e:     # e.g.: botocore.exceptions.EndpointConnectionError
+        logger.critical(str(e))
+        logger.critical("Exiting.")
+        sys.exit()
+    parser = argparse.ArgumentParser(description = 'Create a set of recommended CloudWatch alarms for a given Amazon Elasticsearch Service domain.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)  
+    parser.add_argument('-n', '--notify', nargs='+', required = False, default=[],
+        help = "List of CloudWatch alarm actions; e.g. ['arn:aws:sns:xxxx']")        
     parser.add_argument("-c", "--cluster", required = True, type = str, help = "Amazon Elasticsearch Service domain name (e.g., testcluster1)")
-    #parser.add_argument("-a", "--account", required = True, type = int, help = "AWS account id of the owning account (needed for metric dimension).")
+    parser.add_argument("-a", "--account", required = False, type = int, default=currentAccount,
+        help = "AWS account id of the owning account (needed for metric dimension).")
     parser.add_argument("-e", "--env", required = False, type = str, default = "Test", 
-        help = "Environment (e.g., Test, or Prod). Prepended to the alarm name.")
-    parser.add_argument("-n", "--notify", required = False, type = str, default=alarmActions,
-        help = "List of CloudWatch alarm actions; e.g. ['arn:aws:sns:xxxx']")
-    # The following argument should be removed (TO DO) once we calculate free storage required based on cluster size for instance storage too
-    parser.add_argument("-f", "--free", required = False, type = float, default=2000.0, help = "Minimum free storage (MB) on which to alarm")
+        help = "Environment (e.g., Test, or Prod). Prepended to the alarm name.")    
+    parser.add_argument("-f", "--free", required = False, type = float, default=DEFAULT_ES_FREESPACE, 
+        help = "Minimum free storage (MB) on which to alarm")
     parser.add_argument("-p", "--profile", required = False, type = str, default='default',
         help = "IAM profile name to use")
-
-    parser.add_argument("-r", "--region", required = False, type = str, default='us-east-1', help = "AWS region for the cluster.")
+    parser.add_argument("-r", "--region", required = False, type = str, default=DEFAULT_REGION, help = "AWS region for the cluster.")
     
     if len(sys.argv) == 1:
         parser.error('Insufficient arguments provided. Exiting for safety.')
@@ -119,58 +171,77 @@ def get_args():
         sys.exit()
     args = parser.parse_args()
     # Reset minimum allowable, if less than AWS ES min
-    if args.free < esfreespace:
-        args.free = esfreespace
-        
-    args.notify = ast.literal_eval(args.notify)
+    if args.free < MIN_ES_FREESPACE:
+        logger.info("Freespace of " + str(args.free) + " is less than the minimum for AES of " + str(MIN_ES_FREESPACE) + ". Setting to " + str(MIN_ES_FREESPACE))
+        args.free = MIN_ES_FREESPACE
     args.prog = parser.prog
+    
+    if args.notify == []:
+        args.notify = get_default_alarm_actions(args.region,args.account,DEFAULT_SNSTOPIC) 
+    logger.info("Starting at " + str(datetime.utcnow()) + ". Using parameters: " + str(args))
     return args
 
+def calc_storage(b3session, domainStatus, wantesfree):
+    # Calculate the amount of storage the free space alarm requires
+    esfree = float(wantesfree)   # Start with given desired free storage amount
+    ebs = False
+    if not 'ElasticsearchClusterConfig' in domainStatus:
+        logger.error("No ElasticsearchClusterConfig available. Setting desired storage to default: " + str(esfree))
+        return esfree
+    clusterConfig = domainStatus['ElasticsearchClusterConfig'] 
+    is_ebs_enabled = 'EBSOptions' in domainStatus and domainStatus['EBSOptions']['EBSEnabled']
+    if is_ebs_enabled:
+        ebsOptions = domainStatus['EBSOptions']
+        iops = "No Iops"
+        if "Iops" in ebsOptions:
+            iops = str(ebsOptions['Iops']) + " Iops"
+        totalStorage = int(clusterConfig['InstanceCount']) * int(ebsOptions['VolumeSize']) * 1024   # Convert to MB
+        logger.info(' '.join(["EBS enabled:", str(ebsOptions['EBSEnabled']), "type:", str(ebsOptions['VolumeType']), "size (GB):", str(ebsOptions['VolumeSize']), str(iops), str(totalStorage), " total storage (MB)"]))
+        ebs = True
+        esfree = float(int(float(totalStorage) * MIN_ES_FREESPACE_PERCENT))
+    else:
+        logger.warning("EBS not in use. Using instance storage only.")
+        if clusterConfig['InstanceType'] in DISK_SPACE:
+            esfree = DISK_SPACE[clusterConfig['InstanceType']] * 1024 * MIN_ES_FREESPACE_PERCENT * clusterConfig['InstanceCount']
+            logger.info("Instance storage definition found for:", DISK_SPACE[clusterConfig['InstanceType']], "; free storage calced to:", esfree)
+        else:
+            # InstanceType not found in DISK_SPACE. What's going on? (some instance types change to/from EBS, over time, it seems)
+            logger.warning(clusterConfig['InstanceType'] + " is using instance storage, but definition of its disk space is not available.")
+    logger.info("Desired free storage set to (in MB): " + str(esfree)) 
+    return esfree
+    
 ###############################################################################
 # 
 # MAIN
 #
 ###############################################################################    
-if __name__ == "__main__":
-    tmStart = datetime.utcnow()
-    print("Starting ... at {}".format(tmStart))
-    args = get_args()
-    #logging.basicConfig(filename = args.logfile, format = '%(asctime)s %(levelname)s %(message)s', level = LOG_LEVEL)    
-    # Establish credentials
-    account = boto3.client('sts').get_caller_identity().get('Account')
-    b3session = boto3.Session(profile_name=args.profile, region_name=args.region)
-    domain = args.cluster
-    env = args.env
-
-    # Get current account id: BUT, would need that STS access. Making it a parameter instead reduces the privileges required
-    #print(boto3.client('sts').get_caller_identity()['Account'])
+def main():
+    startTime = datetime.utcnow()
+    print("Starting ... at {}".format(startTime))
     
-    # Calculate the amount of storage the free space alarm requires
+    global logger
+    logger = init_logging()
+    os.environ['log_level'] = os.environ.get('log_level', "INFO")
+
+    logger = setup_local_logging(logger, os.environ['log_level'])
+
+    event = {'log_level': 'INFO'}
+    os.environ['AWS_REGION'] = os.environ.get('AWS_REGION', DEFAULT_REGION)
+    
+    args = get_args()
+    theAlarmAction = get_default_alarm_actions(args.region, args.account, DEFAULT_SNSTOPIC) if args.notify is None else args.notify
+    esDomain = args.cluster
+    b3session = boto3.Session(profile_name=args.profile, region_name=args.region)
+
+    # Get current ES config details
     esclient = b3session.client("es")
-    response = esclient.describe_elasticsearch_domain(DomainName=domain)
-    domainStats = response['DomainStatus']
-    clusterConfig = domainStats['ElasticsearchClusterConfig'] 
-    #print(str(response))
-    esfree = float(args.free)   # Reset to default
-    ebs = False
-    if 'EBSOptions' not in domainStats or domainStats['EBSOptions']['EBSEnabled'] == False:
-        self.warnings.append("EBS not in use. Using instance storage only.")
-        if clusterConfig['InstanceType'] in diskSpace:
-            esfree = diskSpace[clusterConfig['InstanceType']] * 1024 * esFreespacePercent * clusterConfig['InstanceCount']
-            print("Instance storage definition is:", diskSpace[clusterConfig['InstanceType']], "; free storage calced to:", esfree)
-        else:
-            # InstanceType not found in diskSpace. What's going on? (some instance types change to/from EBS, over time, it seems)
-            print(clusterConfig['InstanceType'] + " not EBS, and definition of its disk space is not available.")
-    else:  
-        ebsOptions = domainStats['EBSOptions']
-        iops = "No Iops"
-        if "Iops" in ebsOptions:
-            iops = str(ebsOptions['Iops']) + " Iops"
-        totalStorage = int(clusterConfig['InstanceCount']) * int(ebsOptions['VolumeSize']) * 1024   # Convert to MB
-        print("EBS enabled:", ebsOptions['EBSEnabled'], "type:", ebsOptions['VolumeType'], "size (GB):", ebsOptions['VolumeSize'], iops, str(totalStorage), " total storage (MB)")
-        ebs = True
-        esfree = float(int(float(totalStorage) * esFreespacePercent))
-    print("Desired free storage set to (in MB):", str(esfree)) 
+    response = esclient.describe_elasticsearch_domain(DomainName=esDomain)
+    if 'DomainStatus' not in response:
+        # For whatever reason, didn't get a response from this domain. 
+        logger.error("No domainStatus response received from domain " + domain + "; no alarms created")  
+        return   
+
+    domainStatus = response['DomainStatus']
     
     # The following array specifies the statistics we wish to create for each Amazon ES cluster. 
     # The stats are selected per the following documentation:
@@ -179,64 +250,68 @@ if __name__ == "__main__":
     # (MetricName, Statistic, Period, EvaluationPeriods  [int], ComparisonOperator, Threshold [float] )
     #       ComparisonOperator: 'GreaterThanOrEqualToThreshold'|'GreaterThanThreshold'|'LessThanThreshold'|'LessThanOrEqualToThreshold'
     esAlarms = [
-        ("ClusterStatus.yellow", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ),
-        ("ClusterStatus.red",   "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ),
-        ("CPUUtilization", "Average", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ),
-        ("JVMMemoryPressure", "Average", 60, 5, "GreaterThanOrEqualToThreshold", 85.0 ),
-        ("FreeStorageSpace", "Minimum", 60, 5, "LessThanOrEqualToThreshold", float(esfree) ),
-        ("ClusterIndexWritesBlocked", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 )
+        Alarm(metric='ClusterStatus.yellow', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=1.0, alarmAction=theAlarmAction),
+        Alarm(metric='ClusterStatus.red', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=1.0, alarmAction=theAlarmAction),
+        Alarm(metric='CPUUtilization', stat='Average', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=80.0, alarmAction=theAlarmAction),
+        Alarm(metric='JVMMemoryPressure', stat='Average', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=85.0, alarmAction=theAlarmAction),
+        Alarm(metric='ClusterIndexWritesBlocked', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=1.0, alarmAction=theAlarmAction),
+        Alarm(metric="FreeStorageSpace", stat="Minimum", period=60, eval_period=5, 
+            operator="LessThanOrEqualToThreshold", threshold=float(calc_storage(b3session, domainStatus, args.free)), alarmAction=theAlarmAction )
         # OPTIONAL
-        , ("AutomatedSnapshotFailure", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 )        
+        , Alarm(metric='AutomatedSnapshotFailure', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=1.0, alarmAction=theAlarmAction)             
         ]
-        
-    # The following alarms apply for domains with dedicated master nodes.
-    if domainStats['ElasticsearchClusterConfig']['DedicatedMasterEnabled'] == "True":
-        esAlarms.append(("MasterCPUUtilization", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ))
-        # The following doesn't seem to show up in CloudWatch metrics. Why?
-        esAlarms.append(("MasterJVMMemoryPressure", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 80.0 ))
-        esAlarms.append(("MasterReachableFromNode", "Maximum", 60, 5, "LessThanOrEqualToThreshold", 0.0 ))
+ 
+    if domainStatus['ElasticsearchClusterConfig']['DedicatedMasterEnabled']:
+        # The following alarms apply for domains with dedicated master nodes.
+        logger.info(esDomain + " has Dedicated Masters. Adding Master alarms.")
+        esAlarms.append(Alarm(metric='MasterCPUUtilization', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=80.0, alarmAction=theAlarmAction))
+        esAlarms.append(Alarm(metric='MasterJVMMemoryPressure', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=80.0, alarmAction=theAlarmAction))
+        esAlarms.append(Alarm(metric='MasterReachableFromNode', stat='Maximum', period=60, eval_period=5, operator='LessThanOrEqualToThreshold', threshold=0.0, alarmAction=theAlarmAction))
             
-    if "EncryptionAtRestOptions" in domainStats and domainStats["EncryptionAtRestOptions"]["Enabled"]:
+    if "EncryptionAtRestOptions" in domainStatus and domainStatus["EncryptionAtRestOptions"]["Enabled"]:
         # The following alarms are available for domains with encryption at rest
-        esAlarms.append(("KMSKeyError", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))
-        esAlarms.append(("KMSKeyInaccessible", "Maximum", 60, 5, "GreaterThanOrEqualToThreshold", 1.0 ))
-            
+        logger.info(' '.join([esDomain, "is using encryption - adding KMS key alarms. Key:", str_convert_unicode(domainStatus["EncryptionAtRestOptions"]["KmsKeyId"])]))
+        esAlarms.append(Alarm(metric='KMSKeyError', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=1.0, alarmAction=theAlarmAction))
+        esAlarms.append(Alarm(metric='KMSKeyInaccessible', stat='Maximum', period=60, eval_period=5, operator='GreaterThanOrEqualToThreshold', threshold=1.0, alarmAction=theAlarmAction))
+        
     # Unless you add the correct dimensions, the alarm will not correctly "connect" to the metric
     # How do you know what's correct? - at the bottom of http://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/es-metricscollected.html
-    dimensions = [  {"Name": "DomainName", "Value": domain }, 
-                    {"Name": "ClientId", "Value": str(account) }
+    dimensions = [  {"Name": "DomainName", "Value": esDomain }, 
+                    {"Name": "ClientId", "Value": str(args.account) }
                 ]
-    #cwclient = boto3.client("cloudwatch", region_name=esregion)
-    cwclient = b3session.client("cloudwatch")
+    cwclient = b3session.client("cloudwatch", region_name=args.region)
 
-    # For each alarm in the list, create a CloudWatch alarm            
+    # For each alarm in the array, create the CloudWatch alarm for this cluster 
+    # NOTE: If you specify an Action with an SNS topic in the wrong region, you'll get a message that you've chosen an invalid region 
+    # on the put_metric_alarm.
+    theAlarmAction = args.notify
     for esAlarm in esAlarms:
-        (alarmMetric, alarmStat, alarmPeriod, alarmEvalPeriod, alarmOperator, alarmThreshold) = esAlarm
-        alarmName = '-'.join([env, 'Elasticsearch', domain, alarmMetric, 'Alarm'])
-        print("Creating ", alarmName)
-        #print(str(esAlarm))
-        
+        alarmName = '-'.join([args.env, 'Elasticsearch', esDomain, esAlarm.metric, 'Alarm'])        
         response = cwclient.put_metric_alarm(
             AlarmName=alarmName,
             AlarmDescription=alarmName,
             #ActionsEnabled=True|False,
             #OKActions=['string'],
-            AlarmActions= args.notify,
+            AlarmActions=esAlarm.alarmAction,
             #InsufficientDataActions=['string'],
-            MetricName=alarmMetric,
-            Namespace=nameSpace,
-            Statistic=alarmStat,
+            MetricName=esAlarm.metric,
+            Namespace=ES_NAME_SPACE,
+            Statistic=esAlarm.stat,
             #ExtendedStatistic='string',
             Dimensions=dimensions,
-            Period=alarmPeriod,
-            #Unit='Seconds'|'Microseconds'|'Milliseconds'|'Bytes'|'Kilobytes'|'Megabytes'|'Gigabytes'|'Terabytes'|'Bits'|'Kilobits'|'Megabits'|'Gigabits'|'Terabits'|'Percent'|'Count'|'Bytes/Second'|'Kilobytes/Second'|'Megabytes/Second'|'Gigabytes/Second'|'Terabytes/Second'|'Bits/Second'|'Kilobits/Second'|'Megabits/Second'|'Gigabits/Second'|'Terabits/Second'|'Count/Second'|'None',
-            EvaluationPeriods=alarmEvalPeriod,
-            Threshold=alarmThreshold,
-            ComparisonOperator=alarmOperator
+            Period=esAlarm.period,            #Unit='Seconds'|'Microseconds'|'Milliseconds'|'Bytes'|'Kilobytes'|'Megabytes'|'Gigabytes'|'Terabytes'|'Bits'|'Kilobits'|'Megabits'|'Gigabits'|'Terabits'|'Percent'|'Count'|'Bytes/Second'|'Kilobytes/Second'|'Megabytes/Second'|'Gigabytes/Second'|'Terabytes/Second'|'Bits/Second'|'Kilobits/Second'|'Megabits/Second'|'Gigabits/Second'|'Terabits/Second'|'Count/Second'|'None',
+            EvaluationPeriods=esAlarm.eval_period,
+            Threshold=esAlarm.threshold,
+            ComparisonOperator=esAlarm.operator
             #TreatMissingData='string',
             #EvaluateLowSampleCountPercentile='string'
         )
+        logger.info("Created " + alarmName)        
     
-    print("Successfully finished creating alarms!")
+    logger.info("Finished creating " + str(len(esAlarms)) + " alarms for domain " + esDomain + "!")
 
 
+
+
+if __name__ == "__main__":
+    main()
